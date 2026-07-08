@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GeoScan.AI — Geospatial Detection Pipeline</title>
+
+    <!-- Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+    <link rel="stylesheet" href="styles.css" />
+
+    <!-- API base override for dev -->
+    <script>
+        (function(){try{var m=/api=([^&]+)/.exec(location.search);if(m)window.GEOSCAN_API_BASE=decodeURIComponent(m[1]);}catch(e){}})();
+    </script>
+</head>
+<body>
+
+    <!-- ============ HEADER ============ -->
+    <div class="header">
+        <h1><i class="fas fa-satellite-dish" style="color: var(--blue)"></i> GeoScan.AI — Detection Pipeline</h1>
+        <div class="header-right">
+            <div class="health" id="healthStatus"><div class="dot"></div> Connecting...</div>
+        </div>
+    </div>
+
+    <!-- ============ MAIN LAYOUT (40% sidebar / 60% map) ============ -->
+    <div class="main">
+        <!-- =========== SIDEBAR =========== -->
+        <div class="sidebar">
+
+            <!-- ====== CARD: Model Switcher ====== -->
+            <div class="card">
+                <div class="card-title">
+                    <span><i class="fas fa-cube"></i> Active Model</span>
+                    <button class="btn btn-sm" id="toggleAddModelBtn"><i class="fas fa-plus"></i> Add New</button>
+                </div>
+
+                <!-- Add Model Form (hidden by default) -->
+                <div class="add-form" id="addModelForm">
+                    <div class="form-group">
+                        <label>Model Name</label>
+                        <input type="text" id="newModelName" class="form-control" placeholder="My Custom Model">
+                    </div>
+                    <div class="form-group">
+                        <label>Type</label>
+                        <select id="newModelType" class="form-control">
+                            <option value="yolo_detection">YOLO Detection</option>
+                            <option value="yolo_segmentation">YOLO Segmentation</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Model File (.pt)</label>
+                        <input type="file" id="newModelFile" class="form-control" accept=".pt,.pth">
+                    </div>
+                    <button class="btn btn-primary" id="uploadModelBtn" style="margin-bottom:10px;"><i class="fas fa-upload"></i> Upload Model</button>
+                </div>
+
+                <!-- Base models (checkboxes for ensemble) -->
+                <div class="model-list" id="modelList">
+                    <div style="text-align:center; color: var(--muted); padding: 20px;">Loading models...</div>
+                </div>
+
+                <!-- Merge strategy (revealed when 2+ models selected) -->
+                <div class="merge-strat" id="mergeStrat" style="display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+                    <div class="form-group" style="margin:0;">
+                        <label><i class="fas fa-code-branch"></i> Ensemble Strategy</label>
+                        <select id="mergeSelect" class="form-control">
+                            <option value="weighted">Weighted Vote (Default)</option>
+                            <option value="union">Union (Max Recall)</option>
+                            <option value="intersection">Intersection (Max Precision)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ====== CARD: Upload & Process ====== -->
+            <div class="card">
+                <div class="card-title">
+                    <span><i class="fas fa-image"></i> Process Image</span>
+                    <button class="btn btn-sm" id="refreshUploadBtn" title="Clear image and reset"><i class="fas fa-rotate-left"></i> Refresh</button>
+                </div>
+
+                <!-- Image upload zone -->
+                <div class="upload-zone" id="imageZone">
+                    <input type="file" id="imageInput" accept=".tif,.tiff,.jpg,.jpeg,.png,.ecw" hidden>
+                    <i class="fas fa-cloud-arrow-up"></i>
+                    <p id="imageText">Click to upload Image (.tif / .jpg / .png / .ecw)</p>
+                    <span class="upload-hint">Max 100 MB · Min 96 DPI</span>
+                </div>
+
+                <!-- File error -->
+                <div class="file-error" id="fileError" style="display:none;"></div>
+
+                <!-- File meta -->
+                <div class="file-meta" id="fileMeta" style="display:none;">
+                    <i class="fas fa-file-image"></i>
+                    <div class="file-meta__body">
+                        <span id="fileName">—</span>
+                        <span id="fileSize">—</span>
+                    </div>
+                    <button class="file-meta__remove" id="fileRemove"><i class="fas fa-times"></i></button>
+                </div>
+
+                <button class="btn btn-primary" id="submitBtn" disabled>
+                    <i class="fas fa-play"></i> Start Detection
+                </button>
+            </div>
+
+            <!-- ====== CARD: Progress ====== -->
+            <div class="card progress-wrap" id="progressSection" style="display:none;">
+                <div class="card-title"><i class="fas fa-tasks"></i> Status</div>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span class="status status-queued" id="statusBadge">Queued</span>
+                    <span style="font-size:13px;" id="pctText">0%</span>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
+                <div style="font-size:12px; color:var(--muted);">Task: <span id="jobIdText" style="font-family:monospace">-</span></div>
+            </div>
+
+            <!-- ====== CARD: Downloads / Export ====== -->
+            <div class="card downloads" id="downloadSection" style="display:none;">
+                <div class="card-title">
+                    <span><i class="fas fa-download"></i> Results & Export</span>
+                    <button class="btn btn-sm" id="plotMapBtn" title="Plot detections on map"><i class="fas fa-map-pin"></i> Plot on Map</button>
+                </div>
+                <div id="downloadLinks"></div>
+            </div>
+
+            <!-- ====== CARD: Dataset Pool & Retrain ====== -->
+            <div class="card">
+                <div class="card-title">
+                    <span><i class="fas fa-database"></i> Dataset Pool & Retrain</span>
+                    <button class="btn btn-sm" id="refreshDatasetsBtn" title="Refresh"><i class="fas fa-sync-alt"></i></button>
+                </div>
+                <p class="card-note">Upload new datasets → they accumulate. Click "Retrain" to merge ALL datasets and retrain the base model (hot-swap). Like fine-tuning an LLM.</p>
+
+                <div class="upload-zone upload-zone-sm" id="dsZone">
+                    <input type="file" id="dsInput" accept=".zip" hidden>
+                    <i class="fas fa-file-zipper"></i>
+                    <p id="dsText">Upload dataset .zip</p>
+                </div>
+
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                    <input type="text" id="dsName" class="form-control" placeholder="Dataset name (optional)" style="flex:1;">
+                    <button class="btn btn-sm" id="dsAddBtn" disabled style="white-space:nowrap;"><i class="fas fa-plus"></i> Add</button>
+                </div>
+
+                <!-- Pool list -->
+                <div class="ds-pool" id="dsPool">
+                    <div class="ds-pool__empty">No datasets in pool yet</div>
+                </div>
+
+                <!-- Merge mode toggle -->
+                <label class="merge-toggle">
+                    <input type="checkbox" id="mergeFirstCheckbox">
+                    <span class="merge-toggle__box"></span>
+                    <span class="merge-toggle__label">Merge files first <em>(uncheck = train from original locations, faster)</em></span>
+                </label>
+
+                <button class="btn btn-retrain" id="mergeRetrainBtn" disabled>
+                    <i class="fas fa-microchip"></i> <span id="retrainBtnLabel">Retrain on All Datasets</span>
+                </button>
+
+                <div class="retrain-progress" id="mergeProgress" style="display:none;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <span id="mergeStage" style="font-size:12px;">Starting…</span>
+                        <span id="mergePct" style="font-size:12px; font-family:monospace; color:var(--green);">0%</span>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill" id="mergeFill" style="width:0%"></div></div>
+                    <div id="mergeStats" style="display:none; margin-top:6px; font-size:11px; color:var(--muted); font-family:monospace;"></div>
+                </div>
+            </div>
+
+            <!-- ====== CARD: Feedback ====== -->
+            <div class="card">
+                <div class="card-title"><span><i class="fas fa-comment-dots"></i> Feedback</span></div>
+                <p class="card-note">Click any polygon on the map → popup has "Flag" buttons. System auto-retrains after 50 corrections.</p>
+                <div class="feedback-counter" id="feedbackCounter">
+                    <i class="fas fa-bullhorn"></i>
+                    <span id="feedbackCount">0 / 50 corrections collected</span>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- =========== MAP CONTENT (60%) =========== -->
+        <div class="content">
+            <div class="map-container">
+                <!-- Map toolbar -->
+                <div class="map-toolbar">
+                    <div class="card-title" style="margin:0;"><i class="fas fa-map-marked-alt"></i> Detection Map</div>
+                    <div class="map-toolbar__right">
+                        <!-- Legend -->
+                        <div class="legend" id="legend">
+                            <span class="legend__item legend__item--empty">No detections yet</span>
+                        </div>
+                        <!-- Opacity slider -->
+                        <div class="opacity-control">
+                            <i class="fas fa-droplet" style="color:var(--blue); font-size:12px;"></i>
+                            <span style="font-size:11px; color:var(--muted); text-transform:uppercase;">Opacity</span>
+                            <input type="range" id="opacitySlider" min="10" max="100" step="5" value="55" style="width:90px;">
+                            <span id="opacityValue" style="font-size:11px; font-family:monospace; color:var(--blue); font-weight:600; min-width:36px; text-align:right;">55%</span>
+                        </div>
+                        <!-- Refresh map -->
+                        <button class="btn btn-sm" id="refreshMapBtn" title="Clear all polygons and reset view"><i class="fas fa-sync-alt"></i> Refresh Map</button>
+                    </div>
+                </div>
+
+                <!-- Map -->
+                <div id="map"></div>
+
+                <!-- Map stats -->
+                <div class="map-stats">
+                    <span><i class="fas fa-draw-polygon"></i> Polygons: <strong id="polyCount">0</strong></span>
+                    <span><i class="fas fa-layer-group"></i> Classes: <strong id="classCount">0</strong></span>
+                    <span><i class="fas fa-ruler-combined"></i> Total Area: <strong id="areaCount">0 m²</strong></span>
+                    <span><i class="fas fa-bolt"></i> Energy: <strong id="energyCount">0 kWh/yr</strong></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast" style="display:none;"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

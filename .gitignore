@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+backend/storage/
+backend/datasets/
+*.tif
+*.pt
+*.pth
+*.db
