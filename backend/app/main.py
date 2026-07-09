@@ -13,6 +13,7 @@ DELETE /api/models/{user_model_id}        → delete a user-trained model
 POST /api/feedback                        → submit a correction (continuous learning)
 GET  /api/export/{task_id}?format=...     → download shapefile/geojson/kml/csv/json
 POST /api/detect_map                      → run detection on current map view
+GET  /api/image_overlay/{task_id}         → return uploaded image as web overlay
 
 All polygon geometries returned are FULL GeoJSON Polygon rings in EPSG:4326,
 not just centroids. The frontend renders them via L.polygon().
@@ -35,7 +36,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse, Response
 from sqlalchemy.orm import Session
 
 from . import config, geo_utils, ml_pipeline, retrainer
@@ -485,8 +486,9 @@ async def feedback(upload_id: str = Form(...),
     return {"feedback_id": fb.id, "status": "saved",
             "continuous_learning_pending": len(list(FEEDBACK_DIR.glob("*.json")))}
 
+
 # ---------------------------------------------------------------------
-# GET /api/image_overlay/{task_id} — Return the uploaded image as a web-friendly overlay
+# GET /api/image_overlay/{task_id} — Return uploaded image as overlay
 # ---------------------------------------------------------------------
 @app.get("/api/image_overlay/{task_id}")
 def get_image_overlay(task_id: str, db: Session = Depends(get_db)):
@@ -511,7 +513,6 @@ def get_image_overlay(task_id: str, db: Session = Depends(get_db)):
         _, img_encoded = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         img_bytes = img_encoded.tobytes()
     except Exception:
-        # Fallback if encoding fails
         with open(img_path, 'rb') as f:
             img_bytes = f.read()
 
@@ -534,6 +535,7 @@ def get_image_overlay(task_id: str, db: Session = Depends(get_db)):
         "X-Image-Bounds": f"{south},{west},{north},{east}"  # south, west, north, east
     }
     return Response(img_bytes, headers=headers)
+
 
 @app.get("/api/export/{task_id}")
 def export(task_id: str, format: str = "geojson", db: Session = Depends(get_db)):
