@@ -485,6 +485,55 @@ async def feedback(upload_id: str = Form(...),
     return {"feedback_id": fb.id, "status": "saved",
             "continuous_learning_pending": len(list(FEEDBACK_DIR.glob("*.json")))}
 
+# ---------------------------------------------------------------------
+# GET /api/image_overlay/{task_id} — Return the uploaded image as a web-friendly overlay
+# ---------------------------------------------------------------------
+@app.get("/api/image_overlay/{task_id}")
+def get_image_overlay(task_id: str, db: Session = Depends(get_db)):
+    up = db.query(Upload).filter(Upload.id == task_id).first()
+    if not up:
+        raise HTTPException(404, "Task not found")
+
+    img_path = str(STORAGE_DIR / task_id)
+    if not os.path.isfile(img_path):
+        raise HTTPException(404, "Original image file not found on disk")
+
+    # Read image using OpenCV (handles .tif, .jpg, .png)
+    img = cv2.imread(img_path)
+    if img is None:
+        # Fallback to PIL if OpenCV fails (some GeoTIFFs)
+        from PIL import Image
+        pil_img = Image.open(img_path)
+        img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+    # Convert to JPEG bytes to reduce size and ensure browser compatibility
+    try:
+        _, img_encoded = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        img_bytes = img_encoded.tobytes()
+    except Exception:
+        # Fallback if encoding fails
+        with open(img_path, 'rb') as f:
+            img_bytes = f.read()
+
+    # Get the bounds (GPS coordinates) from the Upload record
+    bounds = json.loads(up.bounds_geojson) if up.bounds_geojson else None
+    if not bounds:
+        raise HTTPException(400, "No GPS bounds available for this image. Cannot overlay.")
+
+    # Extract the 4 corners from the GeoJSON polygon ring
+    ring = bounds["coordinates"][0]
+    # [[west, north], [east, north], [east, south], [west, south], [west, north]]
+    west = ring[0][0]
+    east = ring[1][0]
+    north = ring[0][1]
+    south = ring[2][1]
+
+    # Return the image bytes with bounds in headers so the frontend can place it
+    headers = {
+        "Content-Type": "image/jpeg",
+        "X-Image-Bounds": f"{south},{west},{north},{east}"  # south, west, north, east
+    }
+    return Response(img_bytes, headers=headers)
 
 @app.get("/api/export/{task_id}")
 def export(task_id: str, format: str = "geojson", db: Session = Depends(get_db)):
