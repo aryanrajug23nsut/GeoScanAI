@@ -730,11 +730,17 @@ def fetch_map_tiles(west, south, east, north, zoom=18):
         lat = math.degrees(lat_rad)
         return lat, lon
 
-    x_min, y_max = lonlat_to_tile(north, west, zoom)
-    x_max, y_min = lonlat_to_tile(south, east, zoom)
+    # Calculate all 4 tile boundaries and use min/max to ensure correct order
+    x1, y1 = lonlat_to_tile(north, west, zoom)
+    x2, y2 = lonlat_to_tile(south, east, zoom)
+    
+    x_min = min(x1, x2)
+    x_max = max(x1, x2)
+    y_min = min(y1, y2)  # Top (North)
+    y_max = max(y1, y2)  # Bottom (South)
 
-    # Limit to 5x5 tiles max to prevent memory crashes
-    if (x_max - x_min) > 4 or (y_max - y_min) > 4:
+    # Limit to 10x10 tiles max to prevent memory crashes (increased from 5x5)
+    if (x_max - x_min) > 9 or (y_max - y_min) > 9:
         raise HTTPException(400, "Map area is too large. Please zoom in closer (zoom level 17+ recommended).")
 
     tile_size = 256
