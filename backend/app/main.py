@@ -17,7 +17,8 @@ All polygon geometries returned are FULL GeoJSON Polygon rings in EPSG:4326,
 not just centroids. The frontend renders them via L.polygon().
 """
 from __future__ import annotations
-
+import math
+import requests
 import io
 import json
 import os
@@ -876,7 +877,142 @@ def retrain_merge_status(job_id: str):
 # ---------------------------------------------------------------------
 # Root
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Helper: Fetch satellite tiles for a bounding box
+# ---------------------------------------------------------------------
+def fetch_map_tiles(west, south, east, north, zoom=18):
+    """Downloads Esri satellite tiles for a bounding box and stitches them."""
+    def lonlat_to_tile(lat, lon, z):
+        n = 2.0 ** z
+        xtile = int((lon + 180.0) / 360.0 * n)
+        ytile = int((1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * n)
+        return xtile, ytile
+
+    def tile_to_top_left_lonlat(xtile, ytile, z):
+        n = 2.0 ** z
+        lon = xtile / n * 360.0 - 180.0
+        lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
+        lat = math.degrees(lat_rad)
+        return lat, lon
+
+    x_min, y_max = lonlat_to_tile(north, west, zoom)
+    x_max, y_min = lonlat_to_tile(south, east, zoom)
+
+    # Limit to 5x5 tiles max to prevent memory crashes
+    if (x_max - x_min) > 4 or (y_max - y_min) > 4:
+        raise HTTPException(400, "Map area is too large. Please zoom in closer (zoom level 17+ recommended).")
+
+    tile_size = 256
+    stitched_width = (x_max - x_min + 1) * tile_size
+    stitched_height = (y_max - y_min + 1) * tile_size
+    stitched_img = np.zeros((stitched_height, stitched_width, 3), dtype=np.uint8)
+
+    for x in range(x_min, x_max + 1):
+        for y in range(y_min, y_max + 1):
+            url = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{y}/{x}"
+            try:
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    img_array = np.asarray(bytearray(r.content), dtype=np.uint8)
+                    tile_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                    px = (x - x_min) * tile_size
+                    py = (y - y_min) * tile_size
+                    stitched_img[py:py+tile_size, px:px+tile_size] = tile_img
+            except Exception as e:
+                print(f"Failed to download tile {x},{y}: {e}")
+
+    top_left_lat, top_left_lon = tile_to_top_left_lonlat(x_min, y_min, zoom)
+    bottom_right_lat, bottom_right_lon = tile_to_top_left_lonlat(x_max + 1, y_max + 1, zoom)
+
+    lon_per_px = (bottom_right_lon - top_left_lon) / stitched_width
+    lat_per_px = (bottom_right_lat - top_left_lat) / stitched_height
+
+    transform = geo_utils.GeoTransform(
+        origin_lon=top_left_lon,
+        origin_lat=top_left_lat,
+        lon_per_px=lon_per_px,
+        lat_per_px=lat_per_px,
+        crs="EPSG:4326"
+    )
+    return stitched_img, transform
+
+# ---------------------------------------------------------------------
+# POST /api/detect_map — Run detection on current map view
+# ---------------------------------------------------------------------
+@app.post("/api/detect_map", response_model=DetectionResponse)
+def detect_map(west: float = Form(...), south: float = Form(...), 
+               east: float = Form(...), north: float = Form(...), 
+               zoom: int = Form(18),
+               db: Session = Depends(get_db)):
+    
+    print(f"[detect_map] Fetching imagery for bbox: W={west}, S={south}, E={east}, N={north} zoom={zoom}")
+    
+    try:
+        img, transform = fetch_map_tiles(west, south, east, north, zoom)
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(500, f"Failed to fetch map tiles: {e}")
+
+    # Create a fake upload record so we can store results
+    task_id = datetime.utcnow().strftime("%Y%m%d%H%M%S") + "_mapview"
+    upload_row = Upload(id=task_id, filename=f"MapView_{zoom}", status="processing", crs="EPSG:4326")
+    db.add(upload_row)
+    db.commit()
+
+    try:
+        base_roof_pt = str(MODELS_DIR / "best_roof.pt")
+        base_solar_pt = str(MODELS_DIR / "best_solar.pt")
+
+        all_features = []
+        
+        # 1. ROOF DETECTION
+        roof_result = ml_pipeline.detect(
+            img_path="", transform=transform,
+            weights_path=base_roof_pt, model_name="base-v7.6",
+            category="rooftop", image_bgr=img)
+        all_features.extend(roof_result.features)
+
+        # 2. SOLAR PANEL DETECTION
+        if os.path.isfile(base_solar_pt):
+            solar_result = ml_pipeline.detect(
+                img_path="", transform=transform,
+                weights_path=base_solar_pt, model_name="base-v7.6-solar",
+                category="solar_panel", image_bgr=img)
+            all_features.extend(solar_result.features)
+
+        # Save to DB
+        for feat in all_features:
+            ring = feat["geometry"]["coordinates"][0]
+            lat, lon = geo_utils.ring_centroid(ring)
+            props = feat["properties"]
+            if props["type"] == "rooftop":
+                db.add(Rooftop(
+                    upload_id=task_id, category="res", area_sqm=props.get("area_m2", 0),
+                    lat=lat, lon=lon, geometry=json.dumps(feat["geometry"]),
+                    confidence=props.get("confidence", 0), model=props.get("model", "base-v7.6"),
+                    usable_area_sqm=props.get("usable_area_sqm", 0), panel_count=props.get("panel_count", 0),
+                    energy_kwh_yr=props.get("energy_kwh_yr", 0),
+                ))
+            else:
+                db.add(SolarPanel(
+                    upload_id=task_id, area_sqm=props.get("area_m2", 0),
+                    lat=lat, lon=lon, geometry=json.dumps(feat["geometry"]),
+                    confidence=props.get("confidence", 0), model=props.get("model", "base-v7.6-solar"),
+                ))
+
+        upload_row.status = "done"
+        db.commit()
+        return get_results(task_id, db)
+
+    except Exception as exc:
+        upload_row.status = "error"
+        upload_row.error_message = str(exc)
+        db.commit()
+        raise HTTPException(500, f"Map detection failed: {exc}")
 @app.get("/")
 def root():
     return {"app": settings.app_name, "version": "2.1.0",
-            "docs": "/docs", "health": "/api/health"}
+            "docs": "/docs", "health": "/api/health"}   
+
+

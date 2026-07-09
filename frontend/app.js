@@ -23,6 +23,7 @@
     datasetsDelete: (id) => `${API_BASE}/datasets/${id}`,
     retrainMerge: `${API_BASE}/retrain/merge`,
     retrainMergeStatus: (jid) => `${API_BASE}/retrain/merge/status/${jid}`,
+    detectMap: `${API_BASE}/detect_map`, // NEW: Map view detection
   };
   const ALLOWED_EXT = ['.tif', '.tiff', '.jpg', '.jpeg', '.png', '.ecw'];
   const MAX_FILE_SIZE = 100 * 1024 * 1024;
@@ -97,6 +98,7 @@
     downloadSection: $('#downloadSection'),
     downloadLinks: $('#downloadLinks'),
     plotMapBtn: $('#plotMapBtn'),
+    detectMapBtn: $('#detectMapBtn'), // NEW: Map view detection
     // Dataset pool
     refreshDatasetsBtn: $('#refreshDatasetsBtn'),
     dsZone: $('#dsZone'),
@@ -370,8 +372,6 @@
     if (!name || !file) return showToast('Name and file required', 'err');
     const fd = new FormData();
     fd.append('name', name); fd.append('model_type', type); fd.append('model_file', file);
-    // Note: backend's /api/retrain endpoint handles this — we use it for .pt upload
-    // For now, just show a success toast (the actual upload goes through /api/retrain)
     showToast('Model upload feature — use Dataset Pool & Retrain below for training', 'warn');
     dom.addModelForm.classList.remove('show');
     dom.newModelName.value = ''; dom.newModelFile.value = '';
@@ -406,7 +406,6 @@
     fd.append('models', JSON.stringify(state.models));
     const strat = state.mergeStrategy === 'weighted_vote' ? 'weighted' : state.mergeStrategy;
     fd.append('merge_strategy', strat);
-    // Use anchor coords if set, otherwise use map center
     const c = (state.anchorLat !== null) 
       ? { lat: state.anchorLat, lng: state.anchorLng }
       : state.map.getCenter();
@@ -442,6 +441,59 @@
       state.isProcessing = false;
       dom.submitBtn.disabled = false;
       dom.submitBtn.innerHTML = '<i class="fas fa-play"></i> Start Detection';
+    }
+  }
+
+  // ─── NEW: DETECTION ON MAP VIEW ───────────────────────────
+  async function runMapDetection() {
+    const btn = dom.detectMapBtn;
+    if (!btn) return;
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Fetching Map...';
+    
+    const b = state.map.getBounds();
+    const z = state.map.getZoom();
+    
+    dom.progressSection.style.display = 'block';
+    dom.downloadSection.style.display = 'none';
+    updateProgress('queued', 0);
+    dom.jobIdText.textContent = 'map-view';
+
+    const fd = new FormData();
+    fd.append('west', b.getWest());
+    fd.append('south', b.getSouth());
+    fd.append('east', b.getEast());
+    fd.append('north', b.getNorth());
+    fd.append('zoom', z);
+    fd.append('models', JSON.stringify(state.models));
+
+    try {
+      updateProgress('running', 30);
+      const r = await fetch(ENDPOINTS.detectMap, { method: 'POST', body: fd });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${r.status}`); }
+      
+      const payload = await r.json();
+      state.taskId = payload.task_id;
+      dom.jobIdText.textContent = payload.task_id;
+
+      const features = (payload.features || []).map(normalizeFeature);
+      const stats = normalizeStats(payload.stats, features);
+      state.detections = { features, stats, taskId: state.taskId };
+
+      plotDetections(state.detections);
+      updateStats(stats);
+      updateLegend(stats.classes || []);
+      updateProgress('done', 100);
+      showDownloads();
+      showToast(`Map detection complete: ${features.length} features`, 'ok');
+    } catch (err) {
+      console.error(err);
+      updateProgress('failed', 0);
+      showToast(`Map detection failed: ${err.message}`, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
     }
   }
 
@@ -531,6 +583,11 @@
       showToast('Polygons plotted on map', 'ok');
     });
     dom.refreshMapBtn.addEventListener('click', () => { clearMap(); state.map.setView(DEFAULT_CENTER, DEFAULT_ZOOM); showToast('Map cleared', 'ok'); });
+
+    // Detect on Map View button
+    if (dom.detectMapBtn) {
+        dom.detectMapBtn.addEventListener('click', runMapDetection);
+    }
 
     // Build download links dynamically
     const formats = [

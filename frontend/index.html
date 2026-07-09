@@ -112,6 +112,17 @@
                     <button class="file-meta__remove" id="fileRemove"><i class="fas fa-times"></i></button>
                 </div>
 
+                <!-- NEW: Georeference anchor -->
+                <div class="geo-anchor" id="geoAnchor">
+                    <button class="btn btn-sm" id="setAnchorBtn">
+                        <i class="fas fa-crosshairs"></i> Set Image Location on Map
+                    </button>
+                    <div id="anchorCoords" class="anchor-coords" style="display:none;">
+                        <i class="fas fa-location-dot" style="color:var(--green);"></i>
+                        <span id="anchorText">Click the map to set center</span>
+                    </div>
+                </div>
+
                 <button class="btn btn-primary" id="submitBtn" disabled>
                     <i class="fas fa-play"></i> Start Detection
                 </button>
@@ -201,6 +212,10 @@
                 <div class="map-toolbar">
                     <div class="card-title" style="margin:0;"><i class="fas fa-map-marked-alt"></i> Detection Map</div>
                     <div class="map-toolbar__right">
+                        <!-- NEW: Detect on Map View Button -->
+                        <button class="btn btn-sm" id="detectMapBtn" title="Run AI detection on the current satellite map view">
+                            <i class="fas fa-satellite-dish"></i> Detect on Map View
+                        </button>
                         <!-- Legend -->
                         <div class="legend" id="legend">
                             <span class="legend__item legend__item--empty">No detections yet</span>
