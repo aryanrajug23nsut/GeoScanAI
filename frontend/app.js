@@ -23,7 +23,8 @@
     datasetsDelete: (id) => `${API_BASE}/datasets/${id}`,
     retrainMerge: `${API_BASE}/retrain/merge`,
     retrainMergeStatus: (jid) => `${API_BASE}/retrain/merge/status/${jid}`,
-    detectMap: `${API_BASE}/detect_map`, // NEW: Map view detection
+    detectMap: `${API_BASE}/detect_map`,
+    imageOverlay: (tid) => `${API_BASE}/image_overlay/${tid}`, // NEW: Image overlay
   };
   const ALLOWED_EXT = ['.tif', '.tiff', '.jpg', '.jpeg', '.png', '.ecw'];
   const MAX_FILE_SIZE = 100 * 1024 * 1024;
@@ -58,6 +59,7 @@
     feedbackCount: 0, activeModelId: null,
     map: null, satLayer: null, polygonLayer: null, fillOpacity: 0.55,
     anchorMode: false, anchorLat: null, anchorLng: null, anchorMarker: null,
+    imageOverlayLayer: null, // NEW: Image overlay layer
   };
 
   // ─── DOM refs ───────────────────────────────────────────
@@ -98,7 +100,8 @@
     downloadSection: $('#downloadSection'),
     downloadLinks: $('#downloadLinks'),
     plotMapBtn: $('#plotMapBtn'),
-    detectMapBtn: $('#detectMapBtn'), // NEW: Map view detection
+    detectMapBtn: $('#detectMapBtn'),
+    toggleImageOverlayBtn: $('#toggleImageOverlayBtn'), // NEW: Image overlay toggle
     // Dataset pool
     refreshDatasetsBtn: $('#refreshDatasetsBtn'),
     dsZone: $('#dsZone'),
@@ -174,6 +177,14 @@
     dom.areaCount.textContent = '0 m²';
     dom.energyCount.textContent = '0 kWh/yr';
     dom.legend.innerHTML = '<span class="legend__item legend__item--empty">No detections yet</span>';
+    if (state.imageOverlayLayer) {
+      state.map.removeLayer(state.imageOverlayLayer);
+      state.imageOverlayLayer = null;
+      if (dom.toggleImageOverlayBtn) {
+        dom.toggleImageOverlayBtn.classList.remove('active');
+        dom.toggleImageOverlayBtn.innerHTML = '<i class="fas fa-image"></i> Show Image';
+      }
+    }
   }
 
   // ============================================================
@@ -300,6 +311,7 @@
     clearFileError();
     dom.progressSection.style.display = 'none';
     dom.downloadSection.style.display = 'none';
+    if (dom.toggleImageOverlayBtn) dom.toggleImageOverlayBtn.style.display = 'none';
   }
 
   // ============================================================
@@ -444,7 +456,7 @@
     }
   }
 
-  // ─── NEW: DETECTION ON MAP VIEW ───────────────────────────
+  // ─── DETECTION ON MAP VIEW ───────────────────────────
   async function runMapDetection() {
     const btn = dom.detectMapBtn;
     if (!btn) return;
@@ -494,6 +506,59 @@
     } finally {
       btn.disabled = false;
       btn.innerHTML = originalHtml;
+    }
+  }
+
+  // ─── IMAGE OVERLAY TOGGLE ───────────────────────────
+  async function toggleImageOverlay() {
+    const btn = dom.toggleImageOverlayBtn;
+    if (!btn) return;
+
+    // If overlay exists, remove it
+    if (state.imageOverlayLayer) {
+      state.map.removeLayer(state.imageOverlayLayer);
+      state.imageOverlayLayer = null;
+      btn.classList.remove('active');
+      btn.innerHTML = '<i class="fas fa-image"></i> Show Image';
+      return;
+    }
+
+    // If no overlay exists, fetch and add it
+    if (!state.taskId) {
+      return showToast('Run detection first to load the image overlay', 'warn');
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Loading...';
+
+    try {
+      const r = await fetch(ENDPOINTS.imageOverlay(state.taskId));
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      
+      // Get bounds from header: "south,west,north,east"
+      const boundsStr = r.headers.get('X-Image-Bounds');
+      if (!boundsStr) throw new Error('Image bounds not found in response');
+
+      const [south, west, north, east] = boundsStr.split(',').map(parseFloat);
+      const bounds = [[north, west], [south, east]]; // Leaflet wants [[lat,lng], [lat,lng]]
+
+      state.imageOverlayLayer = L.imageOverlay(url, bounds, {
+        opacity: 0.7,
+        interactive: true
+      }).addTo(state.map);
+
+      btn.classList.add('active');
+      btn.innerHTML = '<i class="fas fa-eye-slash"></i> Hide Image';
+      state.map.fitBounds(bounds);
+      showToast('Image overlay added. Zoom in to compare.', 'ok');
+    } catch (err) {
+      console.error(err);
+      showToast(`Failed to load image: ${err.message}`, 'err');
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -574,7 +639,10 @@
   // ============================================================
   // 7. DOWNLOADS / EXPORT
   // ============================================================
-  function showDownloads() { dom.downloadSection.style.display = 'block'; }
+  function showDownloads() { 
+    dom.downloadSection.style.display = 'block'; 
+    if (dom.toggleImageOverlayBtn) dom.toggleImageOverlayBtn.style.display = 'inline-flex';
+  }
 
   function initDownloads() {
     dom.plotMapBtn.addEventListener('click', () => {
@@ -587,6 +655,10 @@
     // Detect on Map View button
     if (dom.detectMapBtn) {
         dom.detectMapBtn.addEventListener('click', runMapDetection);
+    }
+    // Image Overlay Toggle
+    if (dom.toggleImageOverlayBtn) {
+        dom.toggleImageOverlayBtn.addEventListener('click', toggleImageOverlay);
     }
 
     // Build download links dynamically
