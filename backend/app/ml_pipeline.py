@@ -65,18 +65,8 @@ SYSTEM_EFFICIENCY = 0.75
 AVG_SUN_HOURS = 5.5
 
 def _detect_single(image_bgr: np.ndarray, model, conf_thresh: float) -> np.ndarray:
-    """Run YOLO on a single image (resized to max 1280px) and return a binary mask."""
+    """Run YOLO on an image using 640x640 tiles (matches Colab accuracy)."""
     h, w = image_bgr.shape[:2]
-    max_dim = 1280
-    
-    # Resize if image is huge to prevent memory crash and speed up inference
-    if max(h, w) > max_dim:
-        scale = max_dim / max(h, w)
-        small = cv2.resize(image_bgr, (int(w*scale), int(h*scale)))
-    else:
-        scale = 1.0
-        small = image_bgr
-
     mask_full = np.zeros((h, w), dtype=np.uint8)
     
     if model is None:
@@ -85,26 +75,53 @@ def _detect_single(image_bgr: np.ndarray, model, conf_thresh: float) -> np.ndarr
         bin_mask = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 31, -10)
         return bin_mask
 
-    # Real YOLO inference
-    results = model.predict(small, conf=conf_thresh, verbose=False, retina_masks=True)
+    tile_size = 640
+    stride = 512  # 128px overlap to catch objects on edges
     
-    for r in results:
-        # Handle SEGMENTATION models
-        if r.masks is not None:
-            for m in r.masks.data:
-                m_np = (m.cpu().numpy() * 255).astype("uint8")
-                m_resized = cv2.resize(m_np, (small.shape[1], small.shape[0]))
-                m_orig = cv2.resize(m_resized, (w, h))
-                mask_full = cv2.bitwise_or(mask_full, m_orig)
-        # Handle DETECTION models
-        elif r.boxes is not None and len(r.boxes) > 0:
-            for box in r.boxes.xyxy:
-                x1, y1, x2, y2 = box.cpu().numpy().astype(int)
-                # Scale boxes back to original size
-                x1, y1 = int(x1/scale), int(y1/scale)
-                x2, y2 = int(x2/scale), int(y2/scale)
-                cv2.rectangle(mask_full, (x1, y1), (x2, y2), 255, -1)
-                
+    # If image is smaller than one tile, just run it directly
+    if h <= tile_size and w <= tile_size:
+        results = model.predict(image_bgr, conf=conf_thresh, verbose=False, retina_masks=True)
+        for r in results:
+            if r.masks is not None:
+                for m in r.masks.data:
+                    m_np = (m.cpu().numpy() * 255).astype("uint8")
+                    m_resized = cv2.resize(m_np, (w, h))
+                    mask_full = cv2.bitwise_or(mask_full, m_resized)
+            elif r.boxes is not None and len(r.boxes) > 0:
+                for box in r.boxes.xyxy:
+                    x1, y1, x2, y2 = box.cpu().numpy().astype(int)
+                    cv2.rectangle(mask_full, (x1, y1), (x2, y2), 255, -1)
+        return mask_full
+
+    # Slice image into tiles
+    coords = []
+    for y in range(0, h, stride):
+        for x in range(0, w, stride):
+            ch = min(tile_size, h - y)
+            cw = min(tile_size, w - x)
+            if ch < 64 or cw < 64: continue
+            coords.append((x, y, cw, ch))
+
+    # Process tiles in batches
+    batch_size = 8
+    for i in range(0, len(coords), batch_size):
+        batch = coords[i:i+batch_size]
+        crops = [image_bgr[y:y+ch, x:x+cw] for x, y, cw, ch in batch]
+        
+        # Run YOLO on batch
+        results = model.predict(crops, conf=conf_thresh, verbose=False, retina_masks=True, iou=0.5)
+        
+        for (x, y, cw, ch), r in zip(batch, results):
+            if r.masks is not None:
+                for m in r.masks.data:
+                    m_np = (m.cpu().numpy() * 255).astype("uint8")
+                    m_resized = cv2.resize(m_np, (cw, ch))
+                    mask_full[y:y+ch, x:x+cw] = cv2.bitwise_or(mask_full[y:y+ch, x:x+cw], m_resized)
+            elif r.boxes is not None and len(r.boxes) > 0:
+                for box in r.boxes.xyxy:
+                    x1, y1, x2, y2 = box.cpu().numpy().astype(int)
+                    cv2.rectangle(mask_full, (x+x1, y+y1), (x+x2, y+y2), 255, -1)
+                    
     return mask_full
 
 def detect(img_path: str,
